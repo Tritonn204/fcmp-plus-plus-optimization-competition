@@ -8,6 +8,18 @@ fn black_box<T>(val: T) -> T {
   val
 }
 
+pub(crate) fn u8_from_bool(bit_ref: &mut bool) -> u8 {
+  let bit_ref = black_box(bit_ref);
+
+  let mut bit = black_box(*bit_ref);
+  let res = black_box(bit as u8);
+  bit.zeroize();
+  debug_assert!((res | 1) == 1);
+
+  bit_ref.zeroize();
+  res
+}
+
 macro_rules! math_op {
   (
     $Value: ident,

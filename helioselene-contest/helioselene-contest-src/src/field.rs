@@ -1,4 +1,5 @@
 use zeroize::{DefaultIsZeroes, Zeroize};
+use crate::backend::u8_from_bool;
 
 use crypto_bigint::{
   U256, U512,
@@ -231,18 +232,6 @@ impl Limbs51 {
     Self(result)
   }
 
-  pub fn ct_gt(&self, other: &Self) -> Choice {
-    let mut borrow = 0u64;
-    
-    for i in 0..5 {
-      let (_, b) = other.0[i].overflowing_add(borrow);
-      let (_, b2) = self.0[i].overflowing_sub(other.0[i].wrapping_add(borrow));
-      borrow = (b | b2) as u64;
-    }
-    
-    Choice::from((borrow == 0) as u8)
-  }
-
   #[inline(always)]
   pub fn pow2k(&self, mut k: u32) -> Self {
     debug_assert!(k > 0);
@@ -252,49 +241,10 @@ impl Limbs51 {
       (x as u128) * (y as u128)
     }
     
-    let mut a = self.0;
+    let mut a = *self;
     
     loop {
-      const C_256: U256H = U256H::from_u128(0x408087d3489a94a791492d8d86d83861u128);
-
-      let c0 = U256H::from_u128(m(a[0], a[0]))
-        .add_truncate(&C_256.mul_by_u128(2 * (m(a[1], a[4]) + m(a[2], a[3]))));
-
-      let mut c1 = U256H::from_u128(2 * m(a[0], a[1]))
-        .add_truncate(&C_256.mul_by_u128(2 * m(a[2], a[4]) + m(a[3], a[3])));
-
-      let mut c2 = U256H::from_u128(2 * m(a[0], a[2]) + m(a[1], a[1]))
-        .add_truncate(&C_256.mul_by_u128(2 * m(a[3], a[4])));
-
-      let mut c3 = U256H::from_u128(2 * (m(a[0], a[3]) + m(a[1], a[2])))
-        .add_truncate(&C_256.mul_by_u128(m(a[4], a[4])));
-
-      let mut c4 = U256H::from_u128(2 * (m(a[0], a[4]) + m(a[1], a[3])) + m(a[2], a[2]));
-
-      a[0] = c0.low_u64() & Self::MASK_51;
-      c1 = c1.add_truncate(&c0.shr(51));
-
-      a[1] = c1.low_u64() & Self::MASK_51;
-      c2 = c2.add_truncate(&c1.shr(51));
-
-      a[2] = c2.low_u64() & Self::MASK_51;
-      c3 = c3.add_truncate(&c2.shr(51));
-
-      a[3] = c3.low_u64() & Self::MASK_51;
-      c4 = c4.add_truncate(&c3.shr(51));
-
-      a[4] = c4.low_u64() & Self::MASK_51;
-      let carry = c4.shr(51);
-
-      let carry_u128 = carry.low_u128();
-      let reduction = C_256.mul_by_u128(carry_u128);
-
-      let red_limbs = reduction.limbs;
-      a[0] += red_limbs[0] & Self::MASK_51;
-      a[1] += ((red_limbs[0] >> 51) | (red_limbs[1] << 13)) & Self::MASK_51;
-      a[2] += ((red_limbs[1] >> 38) | (red_limbs[2] << 26)) & Self::MASK_51;
-      a[3] += ((red_limbs[2] >> 25) | (red_limbs[3] << 39)) & Self::MASK_51;
-      a[4] += red_limbs[3] >> 12;
+      a = a * *self;
       
       k -= 1;
       if k == 0 {
@@ -302,12 +252,12 @@ impl Limbs51 {
       }
     }
     
-    Self(a)
+    a
   }
 
   pub(crate) fn is_zero(&self) -> Choice {
     let reduced = self.reduce_canonical();
-    Choice::from((reduced == Self::ZERO) as u8)
+    Choice::from(u8_from_bool(&mut (reduced == Self::ZERO)))
   }
 
   pub(crate) fn is_negative(&self) -> Choice {
@@ -583,17 +533,14 @@ impl Limbs51 {
   }
 
   pub fn ct_lt(&self, other: &Self) -> Choice {
-      // Start from the most significant limb
-      let mut borrow = 0u64;
-      
-      // Compare from least significant to most significant
-      for i in 0..5 {
-          let (_diff, b) = self.0[i].overflowing_sub(other.0[i].wrapping_add(borrow));
-          borrow = b as u64;
-      }
-      
-      // If there was a final borrow, self < other
-      Choice::from(borrow as u8)
+    let mut borrow = 0u64;
+    
+    for i in 0..5 {
+      let (_diff, b) = self.0[i].overflowing_sub(other.0[i].wrapping_add(borrow));
+      borrow = b as u64;
+    }
+    
+    Choice::from(borrow as u8)
   }
 
   pub fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
@@ -722,7 +669,7 @@ impl HelioseleneField {
   #[inline(always)]
   pub fn reduce_narrow(x: U256) -> U256 {
     let (reduced, borrow) = x.sbb(&MODULUS, Limb::ZERO);
-    U256::conditional_select(&x, &reduced, Choice::from((borrow.0 == 0) as u8))
+    U256::conditional_select(&x, &reduced, Choice::from(u8_from_bool(&mut (borrow.0 == 0))))
   }
 
   pub fn from_be_hex(hex: &str) -> Self {
@@ -837,14 +784,14 @@ impl Field for HelioseleneField {
       u = u.shr(1);
     }
     
-    let is_one = (b.limbs[0] == 1) & 
+    let mut is_one = (b.limbs[0] == 1) & 
                  (b.limbs[1] == 0) & 
                  (b.limbs[2] == 0) & 
                  (b.limbs[3] == 0);
     
     let v_5x51 = Limbs51::from_4x64_to_5x51(&v.limbs);
     let result = Self(v_5x51);
-    CtOption::new(result, Choice::from(is_one as u8))
+    CtOption::new(result, Choice::from(u8_from_bool(&mut is_one)))
   }
 
   fn sqrt(&self) -> CtOption<Self> {
