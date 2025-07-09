@@ -7,10 +7,12 @@ pub use group;
 #[macro_use]
 mod backend;
 
+pub mod field;
+pub use field::HelioseleneField;
 pub use dalek_ff_group::FieldElement as Field25519;
 
-mod field;
-pub use field::HelioseleneField;
+pub mod u256h;
+pub use u256h::U256H;
 
 mod point;
 pub use point::{HeliosPoint, SelenePoint};

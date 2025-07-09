@@ -32,9 +32,15 @@ ec-divisors = { git = "https://github.com/kayabaNerve/fcmp-plus-plus", default-f
 [dev-dependencies]
 hex = "0.4"
 
-rand_core = { version = "0.6", features = ["std"] }
+rand_core = { version = "0.6", default-features = false}
 
-ff-group-tests = { git = "https://github.com/kayabaNerve/fcmp-plus-plus" }
+ff-group-tests = { git = "https://github.com/kayabaNerve/fcmp-plus-plus", default-features = false }
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
 
 [features]
 std = [

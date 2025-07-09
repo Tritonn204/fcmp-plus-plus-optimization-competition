@@ -28,7 +28,6 @@ crate-type = ["cdylib", "rlib"]
 [features]
 std = [
   "rand_core/std",
-
   "helioselene/std",
   "helioselene-contest-src/std",
 ]
