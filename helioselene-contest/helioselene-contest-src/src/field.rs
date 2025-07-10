@@ -249,6 +249,7 @@ impl Limbs51 {
   }
 
   // Check if Limbs51 mod Prime == 0
+  #[inline(always)]
   pub(crate) fn is_zero(&self) -> Choice {
     let reduced = self.reduce_canonical();
     Choice::from(u8_from_bool(&mut (reduced == Self::ZERO)))
@@ -522,6 +523,7 @@ impl Limbs51 {
 
 impl Neg for &Limbs51 {
   type Output = Limbs51;
+  #[inline(always)]
   fn neg(self) -> Limbs51 {
     let mut output = *self;
     output.negate();
@@ -602,6 +604,7 @@ impl HelioseleneField {
     U256::conditional_select(&x, &reduced, Choice::from(u8_from_bool(&mut (borrow.0 == 0))))
   }
 
+    #[inline(always)]
   pub fn from_be_hex(hex: &str) -> Self {
     Self::from_u256(U256H::from_be_hex(hex))
   }
@@ -610,6 +613,7 @@ impl HelioseleneField {
     Self(self.0.reduce_canonical())
   }
   
+  #[inline(always)]
   pub fn is_odd(&self) -> Choice {
     self.0.is_odd()
   }
@@ -852,7 +856,7 @@ impl FieldExtensions for Field25519 {
     *self
   }
   
-  #[inline]
+  #[inline(always)]
   fn pow2k(&self, k: usize) -> Self {
     let mut res = *self;
     for _ in 0..k {
@@ -866,6 +870,7 @@ impl FieldExtensions for Field25519 {
   The extreme amount of repeating ones makes any sliding window unuseful, allowing for a more hardcore version
   of Helioselene sqrt to be used here for full exploitation of the mathematical traits of this curve.
   */
+  #[inline(always)]
   fn sqrt_fast(&self) -> CtOption<Self> {
     // Precomputed sqrt(-1) = 2^((p-1)/4) mod p
     const SQRT_MINUS_ONE: Field25519 = Field25519(Residue::new(&U256::from_be_hex(
