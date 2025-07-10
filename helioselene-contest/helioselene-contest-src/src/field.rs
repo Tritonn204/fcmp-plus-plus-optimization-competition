@@ -840,12 +840,6 @@ pub trait FieldExtensions: Sized {
   /// Square k times
   fn pow2k(&self, k: usize) -> Self;
   
-  /// Compute self^(2^250 - 1) using an optimized addition chain
-  fn pow22501(&self) -> (Self, Self);
-  
-  /// Compute self^((p+3)/8) = self^(2^252 - 2)
-  fn pow_p38(&self) -> Self;
-  
   /// Optimized square root
   fn sqrt_fast(&self) -> CtOption<Self>;
 }
@@ -872,70 +866,111 @@ impl FieldExtensions for Field25519 {
     res
   }
   
-  // TODO: acknowledge/attribute snippet's knowledge to curve25519-dalek
-  #[rustfmt::skip]
-  fn pow22501(&self) -> (Self, Self) {
-    // Each temporary variable t_i is of the form (self)^e_i.
-    // Squaring t_i corresponds to multiplying e_i by 2,
-    // pow2k function squares k times, shifting e_i left by k places.
-    //
-    // Temporary t_i                      Nonzero bits of e_i
-    let t0  = self.square();           // 1         e_0 = 2^1
-    let t1  = t0.square().square();    // 3         e_1 = 2^3
-    let t2  = *self * &t1;              // 3,0       e_2 = 2^3 + 2^0
-    let t3  = t0 * &t2;               // 3,1,0
-    let t4  = t3.square();             // 4,2,1
-    let t5  = t2 * &t4;               // 4,3,2,1,0
-    let t6  = t5.pow2k(5);             // 9,8,7,6,5
-    let t7  = t6 * &t5;               // 9,8,7,6,5,4,3,2,1,0
-    let t8  = t7.pow2k(10);            // 19..10
-    let t9  = t8 * &t7;               // 19..0
-    let t10 = t9.pow2k(20);            // 39..20
-    let t11 = t10 * &t9;              // 39..0
-    let t12 = t11.pow2k(10);           // 49..10
-    let t13 = t12 * &t7;              // 49..0
-    let t14 = t13.pow2k(50);           // 99..50
-    let t15 = t14 * &t13;             // 99..0
-    let t16 = t15.pow2k(100);          // 199..100
-    let t17 = t16 * &t15;             // 199..0
-    let t18 = t17.pow2k(50);           // 249..50
-    let t19 = t18 * &t13;             // 249..0
-
-    (t19, t3)
-  }
-  
-  #[rustfmt::skip]
-  fn pow_p38(&self) -> Self {
-    // The bits of (p+3)/8 = 2^252 - 2 are 11111...11110
-    //
-    //                                 nonzero bits of exponent
-    let (t19, _) = self.pow22501();    // 249..0
-    let t20 = t19.pow2k(2);            // 251..2
-    let t0 = self.square();            // 1
-    let t21 = t20 * &t0;              // 251..2,1
-
-    t21
-  }
-  
+  /*
+  Fast sqrt for Curve 25519, with the addition chain for the inverse exponent's pattern constructed entirely inline.
+  The extreme amount of repeating ones makes any sliding window unuseful, allowing for a more hardcore version
+  of Helioselene sqrt to be used here for full exploitation of the mathematical traits of this curve.
+  */
   fn sqrt_fast(&self) -> CtOption<Self> {
     // Precomputed sqrt(-1) = 2^((p-1)/4) mod p
     const SQRT_MINUS_ONE: Field25519 = Field25519(Residue::new(&U256::from_be_hex(
       "2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0"
     )));
-
-    // Compute r = self^((p+3)/8)
-    let r = self.pow_p38();
     
-    // Check if r^2 = self or r^2 = -self
-    let r_squared = r.square();
+    // Compute self^7 and self^15 directly
+    let self_2 = self.square();                    // self^2
+    let self_3 = self_2 * self;                    // self^3
+    let self_4 = self_2.square();                  // self^4
+    let self_7 = self_4 * &self_3;                 // self^7
+    let self_8 = self_4.square();                  // self^8
+    let self_15 = self_8 * &self_7;                // self^15
+        
+    // self^255 = self^(2^8 - 1) = (self^15)^16 * self^15
+    let self_255 = {
+      let mut r = self_15;
+      r = r.square().square().square().square();
+      r * &self_15
+    };
+    
+    // self^65535 = self^(2^16 - 1) = (self^255)^256 * self^255
+    let self_65535 = {
+      let mut r = self_255;
+      for _ in 0..8 {
+        r = r.square();
+      }
+      r * &self_255
+    };
+    
+    // self^(2^32 - 1) = (self^65535)^65536 * self^65535
+    let self_2_32_minus_1 = {
+      let mut r = self_65535;
+      for _ in 0..16 {
+        r = r.square();
+      }
+      r * &self_65535
+    };
+    
+    // self^(2^64 - 1) = (self^(2^32-1))^(2^32) * self^(2^32-1)
+    let self_2_64_minus_1 = {
+      let mut r = self_2_32_minus_1;
+      for _ in 0..32 {
+        r = r.square();
+      }
+      r * &self_2_32_minus_1
+    };
+    
+    // self^(2^128 - 1) = (self^(2^64-1))^(2^64) * self^(2^64-1)
+    let self_2_128_minus_1 = {
+      let mut r = self_2_64_minus_1;
+      for _ in 0..64 {
+        r = r.square();
+      }
+      r * &self_2_64_minus_1
+    };
+    
+    // Now build self^(2^251 - 1)
+    // 251 = 128 + 64 + 32 + 16 + 8 + 3
+    
+    let mut res = self_2_128_minus_1;
+    
+    // Shift left 64 and multiply by self^(2^64 - 1)
+    for _ in 0..64 {
+      res = res.square();
+    }
+    res *= &self_2_64_minus_1;
+    
+    // Shift left 32 and multiply by self^(2^32 - 1)
+    for _ in 0..32 {
+      res = res.square();
+    }
+    res *= &self_2_32_minus_1;
+    
+    // Shift left 16 and multiply by self^(2^16 - 1)
+    for _ in 0..16 {
+      res = res.square();
+    }
+    res *= &self_65535;
+    
+    // Shift left 8 and multiply by self^(2^8 - 1)
+    for _ in 0..8 {
+      res = res.square();
+    }
+    res *= &self_255;
+    
+    // Shift left 3 and multiply by self^(2^3 - 1) = self^7
+    res = res.square().square().square();
+    res *= &self_7;
+    
+    res = res.square();
+    
+    let r_squared = res.square();
     let is_root = r_squared.ct_eq(self);
     let neg_self = -*self;
     let is_neg_root = r_squared.ct_eq(&neg_self);
     
-    // If r^2 = -self, multiply by sqrt(-1)
-    let corrected_r = Field25519::conditional_select(
-      &r,
-      &(r * SQRT_MINUS_ONE),
+    let corrected_r = Self::conditional_select(
+      &res,
+      &(res * SQRT_MINUS_ONE),
       is_neg_root
     );
     
