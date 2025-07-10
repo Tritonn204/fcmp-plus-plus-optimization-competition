@@ -242,7 +242,7 @@ impl Limbs51 {
     let mut a = *self;
     
     loop {
-      a = a * *self;
+      a = a.square();
       
       k -= 1;
       if k == 0 {

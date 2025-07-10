@@ -1,5 +1,11 @@
 use core::ops::{Mul, BitAnd, Shr};
 
+/*
+Minimal constant-time u256 implementation, filled out manually on an as-needed basis.
+Routing through this instead of crypto_bigint::U256 is orders of magnitude faster for equivalent
+code layouts on the using-end.
+*/
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct U256H {
   pub(crate) limbs: [u64; 4],
@@ -14,12 +20,21 @@ impl U256H {
 
   pub const fn from_be_hex(hex: &str) -> Self {
     const fn hex_val(byte: u8) -> u8 {
-      match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => panic!("Invalid hex character"),
-      }
+      let is_digit = (byte.wrapping_sub(b'0') <= 9) as u8;
+      let is_lower = (byte.wrapping_sub(b'a') <= 5) as u8;
+      let is_upper = (byte.wrapping_sub(b'A') <= 5) as u8;
+
+      let digit_val = byte.wrapping_sub(b'0');
+      let lower_val = byte.wrapping_sub(b'a').wrapping_add(10);
+      let upper_val = byte.wrapping_sub(b'A').wrapping_add(10);
+
+      let val = (is_digit * digit_val)
+              | (is_lower * lower_val)
+              | (is_upper * upper_val);
+
+      assert!(is_digit | is_lower | is_upper != 0, "Invalid hex character");
+
+      val
     }
 
     const fn byte_from_hex(s: &str, i: usize) -> u8 {
@@ -28,9 +43,7 @@ impl U256H {
     }
 
     const fn build_limbs(hex: &str) -> [u64; 4] {
-      if hex.len() != 64 {
-        panic!("Hex string must be exactly 64 characters");
-      }
+      assert!(hex.len() == 64, "Hex string must be exactly 64 characters");
 
       let mut limbs = [0u64; 4];
       let mut i = 0;
@@ -280,11 +293,6 @@ impl U256H {
     
     U256H { limbs: [sum0, sum1, sum2, sum3] }
   }
-  
-  #[inline(always)]
-  pub fn mul_add_u128(self, mul_val: u128, add_val: u128) -> Self {
-    self.mul_by_u128(mul_val).add_u128(add_val)
-  }
 
   #[inline(always)]
   pub fn shr(&self, shift: u32) -> U256H {
@@ -314,11 +322,6 @@ impl U256H {
     }
     
     U256H { limbs: result }
-  }
-  
-  #[inline(always)]
-  pub fn and_u64(&self, val: u64) -> u64 {
-      self.limbs[0] & val
   }
 
   #[inline(always)]
@@ -391,7 +394,6 @@ impl U256H {
     bytes
   }
 
-  // To big-endian bytes
   #[inline(always)]
   pub fn to_be_bytes(&self) -> [u8; 32] {
     let mut bytes = [0u8; 32];
