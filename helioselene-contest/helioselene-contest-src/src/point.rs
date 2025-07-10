@@ -30,7 +30,8 @@ use crate::{
 The lazy reduction's bleeding edge was searched for, and seems to have been found in my testing.
 That being said, if there are indeed 0.00n% edge cases where this math fails with point combinations,
 this can be mitigated by forcing addition to reduce_weak() at the end of each add/sub in field.rs at 
-the return points of add() and sub().
+the return points of add() and sub(). Alternatively, spot reduction frequency can be increased in
+the point add+double methods.
 
 My bounds analysis and anectodal spamming of the crate testing via cargo seems to indicate that should
 not be necessary, but as always, I could be wrong as I don't know everything.
