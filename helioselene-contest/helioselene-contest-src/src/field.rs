@@ -234,11 +234,6 @@ impl Limbs51 {
   pub fn pow2k(&self, mut k: u32) -> Self {
     debug_assert!(k > 0);
     
-    #[inline(always)]
-    fn m(x: u64, y: u64) -> u128 {
-      (x as u128) * (y as u128)
-    }
-    
     let mut a = *self;
     
     loop {
