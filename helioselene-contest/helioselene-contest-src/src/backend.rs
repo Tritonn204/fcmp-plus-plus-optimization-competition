@@ -38,7 +38,7 @@ macro_rules! math_op {
     }
     impl $Assign<$Other> for $Value {
       fn $assign_fn(&mut self, other: $Other) {
-        self.0 = $function(self.0, other.0).propogate_carries();
+        self.0 = $function(self.0, other.0);
       }
     }
     impl<'a> $Op<&'a $Other> for $Value {
@@ -49,7 +49,7 @@ macro_rules! math_op {
     }
     impl<'a> $Assign<&'a $Other> for $Value {
       fn $assign_fn(&mut self, other: &'a $Other) {
-        self.0 = $function(self.0, other.0).propogate_carries();
+        self.0 = $function(self.0, other.0);
       }
     }
   };
@@ -128,6 +128,7 @@ macro_rules! field {
         Self::from_bytes(&bytes)
       }
       
+      // allow for compile-time declarations through u256h
       pub const fn from_u256(val: U256H) -> Self {
         const LOW_51_BIT_MASK: u64 = (1u64 << 51) - 1;
 
@@ -172,6 +173,7 @@ macro_rules! field {
         self.0.to_bytes()
       }
 
+      // Restructured for cache friendliness and unrolling, reducing WASM cycles
       pub fn pow(&self, other: $FieldName) -> $FieldName {
         let mut table = [Self(Limbs51::ONE); 16];
         table[1] = *self;
@@ -205,10 +207,8 @@ macro_rules! field {
           bits |= ((exp_bytes[(bit_offset + 2) / 8] >> ((bit_offset + 2) % 8)) & 1) << 2;
           bits |= ((exp_bytes[(bit_offset + 3) / 8] >> ((bit_offset + 3) % 8)) & 1) << 3;
           
-          // More efficient constant-time lookup using the original table
           let bits_usize = bits as usize;
           
-          // Constant-time table lookup with fewer comparisons
           let mut factor = table[0];
           for i in 1..16 {
             let choice = (bits_usize).ct_eq(&i);
