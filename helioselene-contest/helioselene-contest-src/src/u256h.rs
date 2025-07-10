@@ -390,31 +390,7 @@ impl U256H {
     }
     bytes
   }
-  pub fn mul_wide(&self, rhs: &U256H) -> (U256H, U256H) {
-    let mut result = [0u64; 8];
-    
-    for i in 0..4 {
-      let mut carry = 0u128;
-      for j in 0..4 {
-        let product = (self.limbs[i] as u128) * (rhs.limbs[j] as u128);
-        let sum = (result[i + j] as u128) + product + carry;
-        result[i + j] = sum as u64;
-        carry = sum >> 64;
-      }
-      if i + 4 < 8 {
-        result[i + 4] = carry as u64;
-      }
-    }
-    
-    let lo = U256H {
-      limbs: [result[0], result[1], result[2], result[3]]
-    };
-    let hi = U256H {
-      limbs: [result[4], result[5], result[6], result[7]]
-    };
-    
-    (lo, hi)
-  }
+
   // To big-endian bytes
   #[inline(always)]
   pub fn to_be_bytes(&self) -> [u8; 32] {

@@ -21,7 +21,9 @@ use ff::{Field, PrimeField, FieldBits, PrimeFieldBits, helpers::sqrt_ratio_gener
 
 const MODULUS_STR: &str = "7fffffffffffffffffffffffffffffffbf7f782cb7656b586eb6d2727927c79f";
 
+// C where 2^255 - C = Helioselene Prime.
 const C_1X: u128 = 0x408087d3489a94a791492d8d86d83861u128;
+// C for Barrett, which is measured against 2^256. Works out to be exactly 2x the above.
 const C_2X: u128 = 0x81010fa69135294f22925b1b0db070c2u128;
 
 // ====================================================================
@@ -35,6 +37,16 @@ impl Limbs51 {
   pub const ZERO: Self = Self([0, 0, 0, 0, 0]);
   pub const ONE: Self = Self([1, 0, 0, 0, 0]);
   const MASK_51: u64 = (1u64 << 51) - 1;
+
+  /*
+  Mathematically derived constants that weak reduce to Helioselene Prime, allowing for efficient underflow protection 
+  when subtracting with lazy reduction. I went aggressive to opt for fully lazy reduction in sub as opposed to reducing
+  at the end of every - operator, as the point math is contained enough to justify manual management of
+  intermediate terms.
+
+  These can also be used to negate the sign of any Limbs51 object mod Prime.
+  */
+
   const P_MUL: [u64; 5] = {
     [
       35227423003671024, 
@@ -53,6 +65,16 @@ impl Limbs51 {
   pub fn square(&self) -> Self {
     *self * *self
   }
+
+  /*
+  Multiply + reduce in the same operation, leveraging the full u256-wide version of the reduction constant.
+  Operates in native 5-limb space where possible, allowing for Barrett reduction and propogation without
+  conversion overhead for each call.
+
+  Simpler multiplication with 5-limb representation is possible, and it is fast, but with C as a 128-bit number,
+  performance falls apart. This created the demand for a Barrett system that works on 5 limbs natively as an alternative,
+  clawing back precious performance, and making room for more aggressive chaining due to the reduction traits.
+  */
 
   #[inline(always)]
   pub fn mul_barrett(&self, rhs: &Self) -> Self {
@@ -87,19 +109,17 @@ impl Limbs51 {
     }
     combined[4] = carry as u64;
     
+    // Propogate carries across limbs, both from the Barrett POV and the final limb POV
     let c_lo = C_2X as u64;
     let c_hi = (C_2X >> 64) as u64;
     
-    // combined[4] is at most 2
     let prod_lo = (combined[4] as u128) * (c_lo as u128);
     let prod_hi = (combined[4] as u128) * (c_hi as u128);
     
-    // Combine products
     let lo64 = prod_lo as u64;
     let mid64 = (prod_lo >> 64) as u64 + (prod_hi as u64);
     let hi_bit = (prod_hi >> 64) as u64;
     
-    // Add to combined
     carry = 0;
     
     let sum = (combined[0] as u128) + (lo64 as u128) + carry;
@@ -159,6 +179,7 @@ impl Limbs51 {
     Self(limbs_5x51)
   }
     
+  // Helper to re-condense into u64x4 representation without needing to_bytes, preserving lazy reduction capability.
   #[inline(always)]
   fn to_4x64(&self) -> [u64; 4] {
     let mut result = [0u64; 4];
@@ -172,6 +193,7 @@ impl Limbs51 {
     result
   }
     
+  // Multiply 2 4x64 representations without creating a U256H first.
   #[inline(always)]
   fn mul_wide_u256(a: &[u64; 4], b: &[u64; 4]) -> (U256H, U256H) {
     let mut result = [0u64; 8];
@@ -184,9 +206,7 @@ impl Limbs51 {
         result[i + j] = sum as u64;
         carry = sum >> 64;
       }
-      if i + 4 < 8 {
-        result[i + 4] = carry as u64;
-      }
+      result[i + 4] = carry as u64;
     }
     
     let low = U256H { limbs: [result[0], result[1], result[2], result[3]] };
@@ -195,6 +215,7 @@ impl Limbs51 {
     (low, high)
   }
     
+  // Return to 5x51 bit limbs from a valid 4x64 dataset.
   #[inline(always)]
   fn from_4x64_to_5x51(limbs_4x64: &[u64; 4]) -> Self {
     let mut result = [0u64; 5];
@@ -205,33 +226,10 @@ impl Limbs51 {
     result[3] = ((limbs_4x64[2] >> 25) | (limbs_4x64[3] << 39)) & Self::MASK_51;
     result[4] = (limbs_4x64[3] >> 12) & Self::MASK_51;
     
-    let bit_255_overflow = limbs_4x64[3] >> 63;
-    
-    if bit_255_overflow != 0 {
-      let overflow_reduced = U256H::from_u128(bit_255_overflow as u128 * C_1X);
-      
-      let mut carry = 0u64;
-      
-      let sum0 = result[0] + (overflow_reduced.limbs[0] & Self::MASK_51) + carry;
-      result[0] = sum0 & Self::MASK_51;
-      carry = sum0 >> 51;
-      
-      let sum1 = result[1] + ((overflow_reduced.limbs[0] >> 51) | (overflow_reduced.limbs[1] << 13)) & Self::MASK_51 + carry;
-      result[1] = sum1 & Self::MASK_51;
-      carry = sum1 >> 51;
-      
-      let sum2 = result[2] + ((overflow_reduced.limbs[1] >> 38) | (overflow_reduced.limbs[2] << 26)) & Self::MASK_51 + carry;
-      result[2] = sum2 & Self::MASK_51;
-      carry = sum2 >> 51;
-      
-      if carry != 0 {
-        result[3] += carry;
-      }
-    }
-    
     Self(result)
   }
 
+  // Helper for chaining .square()
   #[inline(always)]
   pub fn pow2k(&self, mut k: u32) -> Self {
     debug_assert!(k > 0);
@@ -255,15 +253,16 @@ impl Limbs51 {
     a
   }
 
+  // Check if Limbs51 mod Prime == 0
   pub(crate) fn is_zero(&self) -> Choice {
     let reduced = self.reduce_canonical();
     Choice::from(u8_from_bool(&mut (reduced == Self::ZERO)))
   }
 
-  pub(crate) fn is_negative(&self) -> Choice {
-    let bytes = self.to_bytes();
-    (bytes[0] & 1).into()
-  }
+  /*
+  Can be used when lower limbs get filled to the point of overflow, to propogate across the limbs of the intermediates when lazy reduction
+  is needed for very large addition chains with limited limb spread, to prevent limb overflow bugs without the overhead of full weak reduce.
+  */
 
   #[inline(always)]
   pub fn propogate_carries(&self) -> Self {
@@ -280,6 +279,22 @@ impl Limbs51 {
     
     Self(result)
   }
+
+  /*
+  This is the pillar of utility for lazy reduction in modular arithmetic. Because multiplication using Barrett reduction,
+  We can allow >= 2^256 limb data to exist within the 13 bits of headroom in each of the five limbs indefinitely.
+  This allows operations to be chained within reason, while deferring the reduction overhead to consolidated critical points.
+
+  This takes care and deliberation, and I have culled as many reductions as I can to allow for safe chaining in the point arithmetic,
+  without breaking tests. The crate tests have been spammed as a sanity check, with no issues seen.
+
+  Do note that since the switch to Barrett in the final stages of development, modular reduction in the mul method is basically free.
+  This allows for even more aggressive inline chaining, which took performance to the next level alongside other optimizations in the point
+  math.
+
+  Concepts here were studied from Curve25519-dalek's field types, with novel carry propogation precision & customs being created for Helioselene
+  Prime.
+  */
 
   pub fn reduce_weak(self) -> Self {
     let mut limbs = self.0;
@@ -325,60 +340,15 @@ impl Limbs51 {
     Self(limbs)
   }
 
-  pub fn reduce_canonical_inplace(&mut self) -> Self {
-    let reduced = self.reduce_weak();
-    
-    self.0[0] = reduced.0[0];
-    self.0[1] = reduced.0[1];
-    self.0[2] = reduced.0[2];
-    self.0[3] = reduced.0[3];
-    self.0[4] = reduced.0[4];
-    
-    let mut limbs_u256 = [
-      U256H::from_u64(self.0[0]),
-      U256H::from_u64(self.0[1]),
-      U256H::from_u64(self.0[2]),
-      U256H::from_u64(self.0[3]),
-      U256H::from_u64(self.0[4]),
-    ];
-    
-    let c_256 = U256H::from_u128(C_1X);
-    let mask51 = U256H::from_u64(Self::MASK_51);
-    
-    let mut q = limbs_u256[0].add_truncate(&c_256) >> 51;
-    q = limbs_u256[1].add_truncate(&q) >> 51;
-    q = limbs_u256[2].add_truncate(&q) >> 51;
-    q = limbs_u256[3].add_truncate(&q) >> 51;
-    q = limbs_u256[4].add_truncate(&q) >> 51;
-    
-    let q_product = q.wrapping_mul(&c_256);
-    let q_lo51 = q_product & mask51;
-    let q_mi51 = (q_product >> 51) & mask51;
-    let q_hi = q_product >> 102;
-    
-    limbs_u256[0] = limbs_u256[0].add_truncate(&q_lo51);
-    limbs_u256[1] = limbs_u256[1].add_truncate(&q_mi51);
-    limbs_u256[2] = limbs_u256[2].add_truncate(&q_hi);
-    
-    self.0[0] = limbs_u256[0].low_u64();
-    self.0[1] = limbs_u256[1].low_u64();
-    self.0[2] = limbs_u256[2].low_u64();
-    self.0[3] = limbs_u256[3].low_u64();
-    self.0[4] = limbs_u256[4].low_u64();
-    
-    // Final carry propagation
-    self.0[1] += self.0[0] >> 51;
-    self.0[0] &= Self::MASK_51;
-    self.0[2] += self.0[1] >> 51;
-    self.0[1] &= Self::MASK_51;
-    self.0[3] += self.0[2] >> 51;
-    self.0[2] &= Self::MASK_51;
-    self.0[4] += self.0[3] >> 51;
-    self.0[3] &= Self::MASK_51;
-    self.0[4] &= Self::MASK_51;
+  /*
+  Completes the deffered modular reduction using the reduction constant (C where 2^255 - C = Prime), resulting
+  in an end value that will always be less than prime. This is done at comparison time for the evaluation of
+  multiple limbs51 objects, OR, in a hypothetical case where a U256 must be extracted from an instance for use
+  in other forms of arithmetic.
 
-    *self
-  }
+  Due to the large C for Helioselene compared to Field25519 where C is only 19, a new term breakdown and carry
+  propogation approach was needed when compared to what you'd see in something like curve25519-dalek.
+  */
 
   pub fn reduce_canonical(&self) -> Self {
     let reduced = self.reduce_weak();
@@ -435,49 +405,9 @@ impl Limbs51 {
     Self(result)
   }
 
-  pub fn raw_bytes(&self) -> [u8; 32] {
-    let r0 = self.0[0];
-    let r1 = self.0[1];
-    let r2 = self.0[2];
-    let r3 = self.0[3];
-    let r4 = self.0[4];
-
-    let mut s = [0u8; 32];
-    s[0] = r0 as u8;
-    s[1] = (r0 >> 8) as u8;
-    s[2] = (r0 >> 16) as u8;
-    s[3] = (r0 >> 24) as u8;
-    s[4] = (r0 >> 32) as u8;
-    s[5] = (r0 >> 40) as u8;
-    s[6] = ((r0 >> 48) | (r1 << 3)) as u8;
-    s[7] = (r1 >> 5) as u8;
-    s[8] = (r1 >> 13) as u8;
-    s[9] = (r1 >> 21) as u8;
-    s[10] = (r1 >> 29) as u8;
-    s[11] = (r1 >> 37) as u8;
-    s[12] = ((r1 >> 45) | (r2 << 6)) as u8;
-    s[13] = (r2 >> 2) as u8;
-    s[14] = (r2 >> 10) as u8;
-    s[15] = (r2 >> 18) as u8;
-    s[16] = (r2 >> 26) as u8;
-    s[17] = (r2 >> 34) as u8;
-    s[18] = (r2 >> 42) as u8;
-    s[19] = ((r2 >> 50) | (r3 << 1)) as u8;
-    s[20] = (r3 >> 7) as u8;
-    s[21] = (r3 >> 15) as u8;
-    s[22] = (r3 >> 23) as u8;
-    s[23] = (r3 >> 31) as u8;
-    s[24] = (r3 >> 39) as u8;
-    s[25] = ((r3 >> 47) | (r4 << 4)) as u8;
-    s[26] = (r4 >> 4) as u8;
-    s[27] = (r4 >> 12) as u8;
-    s[28] = (r4 >> 20) as u8;
-    s[29] = (r4 >> 28) as u8;
-    s[30] = (r4 >> 36) as u8;
-    s[31] = (r4 >> 44) as u8;
-
-    s
-  }
+  /*
+  Spits out the canonical representation of a Limbs51 object as bytes.
+  */
 
   pub fn to_bytes(&self) -> [u8; 32] {
     let l = self.reduce_canonical();
@@ -553,6 +483,7 @@ impl Limbs51 {
     ])
   }
 
+  // Underflow-safe negation of Limbs51 objects, provided they aren't themselves bigger than 276 bits
   pub fn negate(&mut self) {
     *self = Self([
       Self::P_MUL[0] - self.0[0],
@@ -568,6 +499,8 @@ impl Limbs51 {
     (bytes[0] & 1).into()
   }
 
+  // Add limbs assuming there is enough headroom for the result without overflow. This can be ensured by
+  // management in the Point math, allowing for the avoidance of redundant reduction overhead.
   #[inline(always)]
   pub fn add_lazy(self, other: Limbs51) -> Limbs51 {
     Self([
@@ -579,6 +512,7 @@ impl Limbs51 {
     ])
   }
 
+  // Underflow-safe subtraction of Limbs51 objects, provided other isn't bigger than 55-bit max limbs - 16 * prime + self
   #[inline(always)]
   pub fn sub_lazy(self, other: Self) -> Self {
     Self([
@@ -600,6 +534,7 @@ impl Neg for &Limbs51 {
   }
 }
 
+// All ops managed to be lazy reduction compatible in real use with the necessary point math
 impl Add for Limbs51 {
   type Output = Limbs51;
   
@@ -679,11 +614,6 @@ impl HelioseleneField {
   pub fn reduce_canonical(&self) -> Self {
     Self(self.0.reduce_canonical())
   }
-
-  pub fn reduce_canonical_inplace(&mut self) -> Self {
-    self.0.reduce_canonical_inplace();
-    *self
-  }
   
   pub fn is_odd(&self) -> Choice {
     self.0.is_odd()
@@ -708,6 +638,7 @@ impl Field for HelioseleneField {
     (*self + self).reduce_weak()
   }
 
+  // Constant time Binary GCD, converting to/from U256H for the computation
   #[inline(always)]
   fn invert(&self) -> CtOption<Self> {
     let reduced = self.0.reduce_weak();
@@ -794,6 +725,16 @@ impl Field for HelioseleneField {
     CtOption::new(result, Choice::from(u8_from_bool(&mut is_one)))
   }
 
+  /*
+  Constant time sqrt using Tonelli–Shanks Algorithm with a precomputed exponent constant. An addition chain that allows
+  term re-use for the repeating ones found in SQRT_EXP_BYTES was derived to allow a more efficient process than
+  simply using the pow (see backend.rs) sliding window technique across the entire byte set. Significant performance
+  gains and cycle count reductions were enabled by this.
+
+  The operation should be constant time even without forcefully reading the whole table[] every iteration,
+  because SQRT_EXP_BYTES never changes.
+  */
+
   fn sqrt(&self) -> CtOption<Self> {
     const SQRT_EXP_BYTES: [u8; 32] = [
       0xe8, 0xf1, 0x49, 0x9e, 0x9c, 0xb4, 0xad, 0x1b,
@@ -862,6 +803,7 @@ impl Field for HelioseleneField {
     CtOption::new(res, res.square().ct_eq(self))
   }
 
+  // Naive sqrt ratio that uses multiplication by inverse to simulate division.
   fn sqrt_ratio(num: &Self, div: &Self) -> (Choice, Self) {
     let div_inv_opt = div.invert();
     let div_inv = div_inv_opt.unwrap_or(Self::ZERO);
@@ -879,7 +821,6 @@ impl Field for HelioseleneField {
   }
 }
 
-
 impl PartialEq for HelioseleneField {
   fn eq(&self, other: &Self) -> bool {
     self.0.ct_eq(&other.0).into()
@@ -888,13 +829,13 @@ impl PartialEq for HelioseleneField {
 impl Eq for HelioseleneField {}
 
 use crate::Field25519;
+
+// Interface to allow the curve! macro to be unified despite the extra features in Helioselene.
+// Redirects to faster sqrt for Helios decompression exclusively, without touching Field25519 internals.
 pub trait FieldExtensions: Sized {
   fn reduce_weak(&self) -> Self;
   fn reduce_canonical(&self) -> Self;
   fn propogate_carries(&self) -> Self;
-
-  // Interface to allow the curve! macro to be unified despite the extra features in Helioselene
-  // Redirect to faster sqrt for Helios decompression exclusively, without touching Field25519 internals
   
   /// Square k times
   fn pow2k(&self, k: usize) -> Self;
