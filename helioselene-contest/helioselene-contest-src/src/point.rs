@@ -77,6 +77,12 @@ macro_rules! curve {
     impl Add for $Point {
       type Output = $Point;
 
+      /*
+      Batching the operation/reduction sections seems to please the compiler. Along with the innate benefit
+      that comes from lazy reduction for helioselene, here are some other notes on what makes this faster:
+      - All functional constants labelled as such globally, eliminating recomputation ovberhead for both curves
+      - Field * A is the same as Field.triple().negate(), allowing us to eliminate muls for these a=-3 curves
+      */
       #[allow(non_snake_case)]
       fn add(self, other: Self) -> Self {
         let X1 = self.x;
@@ -220,6 +226,8 @@ macro_rules! curve {
 
       #[allow(non_snake_case)]
       #[inline(always)]
+
+      // Same algorithm, just restructured for lazy reduction friendliness.
       fn double(&self) -> Self {
         // dbl-2007-bl-2
         let X1 = self.x;
@@ -285,6 +293,7 @@ macro_rules! curve {
     impl Mul<$Scalar> for $Point {
       type Output = $Point;
       
+      // Restructured for cache friendliness and efficient table precomputation with double()
       fn mul(self, mut scalar: $Scalar) -> $Point {
         let mut table = [$Point::ID; 16];
         table[0] = $Point::ID;
@@ -319,7 +328,12 @@ macro_rules! curve {
           bits |= (scalar_bits[bit_offset + 2] as u8) << 2;
           bits |= (scalar_bits[bit_offset + 3] as u8) << 3;
           
-          res = res + table[bits as usize];
+          let mut term = table[0];
+          for (j, candidate) in table[1 ..].iter().enumerate() {
+            let j = j + 1;
+            term = Self::conditional_select(&term, &candidate, usize::from(bits).ct_eq(&j));
+          }
+          res += term;
         }
 
         scalar.zeroize();
@@ -420,6 +434,8 @@ macro_rules! curve {
   };
 }
 
+// Generator points and B constants declared globally inline to avoid wasteful recomputation. Hex was pre-calculated
+// and fed here manually.
 mod helios {
   use super::*;
 
